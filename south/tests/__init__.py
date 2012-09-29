@@ -31,6 +31,22 @@ except AttributeError:
             return wrapper
         return decorator
 
+# ditto for skipIf
+try:
+    skipIf = unittest.skipIf #@UnusedVariable
+except AttributeError:
+    def skipIf(condition, message):
+        def decorator(testfunc):
+            @wraps(testfunc)
+            def wrapper(self):
+                if condition:
+                    print "Skipping", testfunc.__name__,"--", message
+                else:
+                    # Apply method
+                    testfunc(self)
+            return wrapper
+        return decorator
+
 # Add the tests directory so fakeapp is on sys.path
 test_root = os.path.dirname(__file__)
 sys.path.append(test_root)
@@ -56,21 +72,21 @@ class Monkeypatcher(unittest.TestCase):
             pass
         return fake
 
-
     def setUp(self):
         """
         Changes the Django environment so we can run tests against our test apps.
         """
-        if getattr(self, 'installed_apps', None):
+        if hasattr(self, 'installed_apps'):
+            hacks.store_app_cache_state()
             hacks.set_installed_apps(self.installed_apps)
-    
-    
+
     def tearDown(self):
         """
         Undoes what setUp did.
         """
-        if getattr(self, 'installed_apps', None):
+        if hasattr(self, 'installed_apps'):
             hacks.reset_installed_apps()
+            hacks.restore_app_cache_state()
 
 
 # Try importing all tests if asked for (then we can run 'em)

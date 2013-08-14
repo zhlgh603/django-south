@@ -46,16 +46,16 @@ class DatabaseOperations(generic.DatabaseOperations):
     def delete_column(self, table_name, name):
         q_table_name, q_name = (self.quote_name(table_name), self.quote_name(name))
 
-        # Zap the indexes
-        for ind in self._find_indexes_for_column(table_name,name):
-            params = {'table_name':q_table_name, 'index_name': ind}
-            sql = self.drop_index_string % params
-            self.execute(sql, [])
-
         # Zap the constraints
         for const in self._find_constraints_for_column(table_name,name):
             params = {'table_name':q_table_name, 'constraint_name': const}
             sql = self.drop_constraint_string % params
+            self.execute(sql, [])
+
+        # Zap the indexes
+        for ind in self._find_indexes_for_column(table_name,name):
+            params = {'table_name':q_table_name, 'index_name': ind}
+            sql = self.drop_index_string % params
             self.execute(sql, [])
 
         # Zap default if exists
@@ -72,16 +72,16 @@ class DatabaseOperations(generic.DatabaseOperations):
 
         sql = """
         SELECT si.name, si.id, sik.colid, sc.name
-        FROM dbo.sysindexes SI WITH (NOLOCK)
-        INNER JOIN dbo.sysindexkeys SIK WITH (NOLOCK)
-            ON  SIK.id = Si.id
-            AND SIK.indid = SI.indid
-        INNER JOIN dbo.syscolumns SC WITH (NOLOCK)
-            ON  SI.id = SC.id
-            AND SIK.colid = SC.colid
-        WHERE SI.indid !=0
-            AND Si.id = OBJECT_ID('%s')
-            AND SC.name = '%s'
+        FROM dbo.sysindexes si WITH (NOLOCK)
+        INNER JOIN dbo.sysindexkeys sik WITH (NOLOCK)
+            ON  sik.id = si.id
+            AND sik.indid = si.indid
+        INNER JOIN dbo.syscolumns sc WITH (NOLOCK)
+            ON  si.id = sc.id
+            AND sik.colid = sc.colid
+        WHERE si.indid !=0
+            AND si.id = OBJECT_ID('%s')
+            AND sc.name = '%s'
         """
         idx = self.execute(sql % (table_name, name), [])
         return [i[0] for i in idx]
@@ -142,7 +142,16 @@ class DatabaseOperations(generic.DatabaseOperations):
             cons_name, type = r[:2]
             if type=='PRIMARY KEY' or type=='UNIQUE':
                 cons = all.setdefault(cons_name, (type,[]))
-                cons[1].append(r[7])
+                sql = '''
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE RFD
+                WHERE RFD.CONSTRAINT_CATALOG = %s
+                  AND RFD.CONSTRAINT_SCHEMA = %s
+                  AND RFD.TABLE_NAME = %s
+                  AND RFD.CONSTRAINT_NAME = %s
+                '''
+                columns = self.execute(sql, [db_name, schema_name, table_name, cons_name])
+                cons[1].extend(col for col, in columns)
             elif type=='CHECK':
                 cons = (type, r[2])
             elif type=='FOREIGN KEY':
@@ -233,19 +242,15 @@ class DatabaseOperations(generic.DatabaseOperations):
     
     def _alter_set_defaults(self, field, name, params, sqls): 
         "Subcommand of alter_column that sets default values (overrideable)"
-        # First drop the current default if one exists
+        # Historically, we used to set defaults here.
+        # But since South 0.8, we don't ever set defaults on alter-column -- we only
+        # use database-level defaults as scaffolding when adding columns.
+        # However, we still sometimes need to remove defaults in alter-column.
         table_name = self.quote_name(params['table_name'])
         drop_default = self.drop_column_default_sql(table_name, name)
         if drop_default:
             sqls.append((drop_default, []))
             
-        # Next, set any default
-        
-        if field.has_default():
-            default = field.get_default()
-            literal = self._value_to_unquoted_literal(field, default)
-            sqls.append(('ADD DEFAULT %s for %s' % (self._quote_string(literal), self.quote_name(name),), []))
-
     def _value_to_unquoted_literal(self, field, value):
         # Start with the field's own translation
         conn = self._get_connection()
@@ -423,6 +428,7 @@ class DatabaseOperations(generic.DatabaseOperations):
             INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
             INNER JOIN sys.indexes i ON i.object_id = t.object_id
             INNER JOIN sys.index_columns ic ON ic.object_id = t.object_id
+                                            AND ic.index_id = i.index_id
             INNER JOIN sys.columns c ON c.object_id = t.object_id 
                                      AND ic.column_id = c.column_id
             WHERE i.is_unique=0 AND i.is_primary_key=0 AND i.is_unique_constraint=0
